@@ -24,21 +24,26 @@ class MeshSegmentation(bpy.types.Operator):
                                     items = [('assignMaterials',
                                              "Assign materials",
                                              "Assigns a different material for "
-                                             "each found segment")],
+                                             "each found segment"),
+                                             ('assignUVs',
+                                             "Assign UV islands",
+                                             "Assigns a different UV island for "
+                                             "each found segment")
+                                             ],
                                     description = "What to do with the "
                                                   "segmentation",
-                                    default = 'assignMaterials')
+                                    default = 'assignUVs')
     k = bpy.props.IntProperty(name = "Clusters",
                               description = "Amount of clusters",
                               min = 2,
-                              default = 2)
+                              default = 20)
     delta = bpy.props.FloatProperty(name = "Delta",
                                     description = "Set close to zero for more "
                                                   "importance on the angular "
                                                   "distance, set close to one "
                                                   "for more importance on the "
                                                   "geodesic distance.",
-                                    default = 0.03,
+                                    default = 0.5,
                                     min = 0,
                                     max = 1,
                                     subtype = 'FACTOR')
@@ -48,7 +53,7 @@ class MeshSegmentation(bpy.types.Operator):
                                                 "set close to one to treat "
                                                 "concave and convex angles "
                                                 "equally.",
-                                  default = 0.15,
+                                  default = 0.5,
                                   min = 1e-10,
                                   max = 1,
                                   subtype = 'FACTOR')

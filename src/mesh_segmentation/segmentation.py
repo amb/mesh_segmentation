@@ -6,6 +6,9 @@ import scipy.linalg
 import scipy.cluster
 import scipy.sparse
 import scipy.sparse.csgraph
+import scipy.sparse.linalg
+
+import cProfile, pstats, io
 
 # Controls weight of geodesic to angular distance. Values closer to 0 give
 # the angular distance more importance, values closer to 1 give the geodesic
@@ -15,29 +18,6 @@ delta = None
 # Weight of convexity. Values close to zero give more importance to concave
 # angles, values close to 1 treat convex and concave angles more equally
 eta = None
-
-
-class ProgressBar:
-
-    def __init__(self, steps):
-        self._active = (hasattr(bpy.context.window_manager,'progress_begin') and
-                        hasattr(bpy.context.window_manager,'progress_update')and
-                        hasattr(bpy.context.window_manager,'progress_end'))
-        if self._active:
-            self._steps = 0
-            self._max_steps = steps
-            bpy.context.window_manager.progress_begin(0, 100)
-            bpy.context.window_manager.progress_update(0)
-
-    def step(self):
-        if self._active:
-            self._steps += 1
-            bpy.context.window_manager.progress_update(self._steps /
-                                                       self._max_steps)
-            if self._steps == self._max_steps:
-                bpy.context.window_manager.progress_end()
-                self._active = False
-
 
 def _face_center(mesh, face):
     """Computes the coordinates of the center of the given face"""
@@ -76,7 +56,8 @@ def _create_distance_matrices(mesh, save_dists):
     faces = mesh.polygons
     l = len(faces)
 
-    if not save_dists and ("geo_dist_mat" in mesh and "ang_dist_mat" in mesh and
+    # remove False to have this actually be sometimes true
+    if False and not save_dists and ("geo_dist_mat" in mesh and "ang_dist_mat" in mesh and
                            "geo_dist_avg" in mesh and "ang_dist_sum" in mesh and
                            "num_adj" in mesh and "use_eta_list" in mesh):
         # the matrices are already calculated, we only have to load and
@@ -97,14 +78,13 @@ def _create_distance_matrices(mesh, save_dists):
         # map from edge-key to adjacent faces
         adj_faces_map = {}
         # find adjacent faces by iterating edges
-        progress = ProgressBar(steps = l)
+        print("find adjacent faces")
         for index, face in enumerate(faces):
             for edge in face.edge_keys:
                 if edge in adj_faces_map:
                     adj_faces_map[edge].append(index)
                 else:
                     adj_faces_map[edge] = [index]
-            progress.step()
 
         # average G and cumulated A
         avgG = 0
@@ -117,7 +97,7 @@ def _create_distance_matrices(mesh, save_dists):
         Gcol = []
         Gval = []
         # iterate adjacent faces and calculate distances
-        progress = ProgressBar(steps = len(adj_faces_map))
+        print("iterate adjacent faces and calculate distances")
         for edge, adj_faces in adj_faces_map.items():
             if len(adj_faces) == 2:
                 i = adj_faces[0]
@@ -151,9 +131,8 @@ def _create_distance_matrices(mesh, save_dists):
             elif len(adj_faces) > 2:
                 print("Edge with more than 2 adjacent faces: " + str(adj_faces) + "!")
 
-            progress.step()
-
         # create sparse matrices
+        print("create sparse matrices")
         # matrix of geodesic distances
         G = scipy.sparse.csr_matrix((Gval, (Grow, Gcol)), shape=(l, l))
         # matrix of angular distances
@@ -177,8 +156,7 @@ def _create_affinity_matrix(mesh):
 
     l = len(mesh.polygons)
     print("mesh_segmentation: Creating distance matrices...")
-    G, A, avgG, sumA, num_adj, use_eta_list = _create_distance_matrices(mesh,
-                                                                        False)
+    G, A, avgG, sumA, num_adj, use_eta_list = _create_distance_matrices(mesh, False)
 
     # scale needed angular distances with eta
     for indices in use_eta_list:
@@ -193,7 +171,9 @@ def _create_affinity_matrix(mesh):
 
     print("mesh_segmentation: Finding shortest paths between all faces...")
     # for each non adjacent pair of faces find shortest path of adjacent faces
+    #W = scipy.sparse.csgraph.dijkstra(G + A, unweighted = True, directed = False)
     W = scipy.sparse.csgraph.dijkstra(G + A, directed = False)
+    print("indices")
     inf_indices = numpy.where(numpy.isinf(W))
     W[inf_indices] = 0
 
@@ -210,14 +190,11 @@ def _create_affinity_matrix(mesh):
 
 def _initial_guess(Q, k):
     """Computes an initial guess for the cluster-centers"""
-    n = Q.shape[0]
-    min_value = 2
-    min_indices=(-1,-1)
-    for (i,j), value in numpy.ndenumerate(Q):
-        if i != j and value < min_value:
-            min_value = Q[i,j]
-            min_indices = (i,j)
+    min_value = numpy.min(Q)
+    loc = numpy.argmin(Q)
+    min_indices = (loc // Q.shape[1], loc % Q.shape[0])
 
+    n = Q.shape[0]
     chosen = [min_indices[0], min_indices[1]]
     for _ in range(2,k):
         min_max = float("inf")
@@ -239,6 +216,10 @@ def segment_mesh(mesh, k, coefficients, action):
     action for each cluster
     """
 
+    # profiling
+    pr = cProfile.Profile()
+    pr.enable()
+
     # set coefficients
     global delta
     global eta
@@ -246,31 +227,61 @@ def segment_mesh(mesh, k, coefficients, action):
 
     # affinity matrix
     W = _create_affinity_matrix(mesh)
-    print("mesh_segmentation: Calculating graph laplacian...")
+    print("mesh_segmentation: Calculating graph laplacian with shape:", W.shape)
+
     # degree matrix
     Dsqrt = numpy.diag([math.sqrt(1/entry) for entry in W.sum(1)])
+
     # graph laplacian
-    L = Dsqrt.dot(W.dot(Dsqrt))
+    print("dot products")
+    Dsqrt_s = scipy.sparse.csr_matrix(Dsqrt)
+    W_s = scipy.sparse.csr_matrix(W)
+    L = Dsqrt_s.dot(W_s.dot(Dsqrt_s))
 
     print("mesh_segmentation: Calculating eigenvectors...")
+
     # get eigenvectors
-    l,V = scipy.linalg.eigh(L, eigvals = (L.shape[0] - k, L.shape[0] - 1))
+    l,V = scipy.sparse.linalg.eigsh(L)
+    print(l.shape, V.shape, L.shape)
+
     # normalize each column to unit length
     V = V / [numpy.linalg.norm(column) for column in V.transpose()]
 
     print("mesh_segmentation: Preparing kmeans...")
+
     # compute association matrix
     Q = V.dot(V.transpose())
+
     # compute initial guess for clustering
+    print("mesh_segmentation: Initial guess...")
     initial_clusters = _initial_guess(Q, k)
 
     print("mesh_segmentation: Applying kmeans...")
+
     # apply kmeans
     cluster_res,_ = scipy.cluster.vq.kmeans(V, V[initial_clusters,:])
+    print(cluster_res.shape, V.shape)
+
+    # 1. k-means clustering on curvature (from addon)
+    # 2. make seams
+    # 3. unwrap
+    # 4. mark all islands with loops (more than 1 borders)
+    # 5. connect all border chains into the closest other chain (shortest path mark seam)
+    # 6. repeat 3
+
     # get identification vector
     idx,_ = scipy.cluster.vq.vq(V, cluster_res)
 
     print("mesh_segmentation: Done clustering!")
+
+    # end profile, print results
+    pr.disable()
+    s = io.StringIO()
+    sortby = 'cumulative'
+    ps = pstats.Stats(pr, stream=s)
+    ps.strip_dirs().sort_stats(sortby).print_stats()
+    print(s.getvalue())
+
     # perform action with the clustering result
     if action:
         action(mesh, k, idx)
